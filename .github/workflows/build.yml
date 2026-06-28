@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pyinstaller .
-      - run: pyinstaller --onefile --name ${{ matrix.name }} src/ytdl/cli.py
+      - run: pyinstaller --onefile --name ${{ matrix.name }} --hidden-import textual --hidden-import ytdl.tui --hidden-import ytdl --collect-all ytdl src/ytdl/cli.py
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
