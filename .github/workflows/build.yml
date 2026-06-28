@@ -16,13 +16,10 @@ jobs:
         include:
           - os: ubuntu-latest
             name: ytdl-linux
-            ext: ''
           - os: windows-latest
             name: ytdl.exe
-            ext: .exe
           - os: macos-latest
             name: ytdl-macos
-            ext: ''
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,13 +49,11 @@ jobs:
           body: |
             ## ytdl ${{ github.ref_name }}
 
-            Standalone binaries for all platforms.
+            Standalone binaries for all platforms. No Python or dependencies needed.
 
-            ### Usage
-            ```bash
-            ./ytdl-linux --help
-            ```
-
-            See the [README](https://github.com/${{ github.repository }}) for full documentation.
+            ### Download
+            - **Windows** → `ytdl.exe`
+            - **Linux** → `ytdl-linux`
+            - **macOS** → `ytdl-macos`
           files: artifacts/*
           generate_release_notes: true
