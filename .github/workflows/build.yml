@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: ytdl-*
+          pattern: ytdl*
           merge-multiple: true
           path: artifacts
       - name: Create Release
