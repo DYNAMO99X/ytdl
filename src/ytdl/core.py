@@ -156,6 +156,8 @@ def _build_opts(
         "quiet": quiet,
         "no_warnings": True,
         "ignoreerrors": True,
+        # Force built-in JS interpreter — no Node.js needed
+        "js_runtimes": [],
     }
 
     # Format
