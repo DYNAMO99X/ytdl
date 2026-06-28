@@ -13,7 +13,7 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "textual>=8.0",
-    "yt-dlp>=2024.0",
+    "yt-dlp>=2026.0",
 ]
 
 [project.scripts]

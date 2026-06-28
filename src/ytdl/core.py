@@ -251,7 +251,13 @@ def _build_opts(
 
 def get_info(url: str) -> VideoInfo:
     """Get video information."""
-    opts = {"quiet": True, "no_warnings": True}
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        # Don't filter formats — just get all available info
+        "format": None,
+        "extract_flat": False,
+    }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             data = ydl.extract_info(url, download=False)
@@ -278,6 +284,7 @@ def search(query: str, limit: int = 10) -> list[VideoInfo]:
         "no_warnings": True,
         "extract_flat": True,
         "ignoreerrors": True,
+        "format": None,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
