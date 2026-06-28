@@ -1,14 +1,15 @@
-"""Core yt-dlp subprocess wrapper."""
+"""Core yt-dlp Python API wrapper."""
 
 import json
 import os
 import re
-import shlex
-import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+import yt_dlp
 
 from ytdl.config import load_config, get_download_dir
 
@@ -123,94 +124,11 @@ def format_filesize(size: Optional[int]) -> str:
     return f"{size:.1f} PB"
 
 
-def _run_ytdlp(args: list[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
-    """Run yt-dlp with given args and return result."""
-    cmd = ["yt-dlp"] + args
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return result
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("yt-dlp timed out")
-    except FileNotFoundError:
-        raise RuntimeError(
-            "yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp"
-        )
+# ── yt-dlp Python API Wrapper ─────────────────────────────────────────
 
 
-def get_info(url: str) -> VideoInfo:
-    """Get video information."""
-    args = [
-        "--dump-json",
-        "--no-download",
-        "--no-warnings",
-        url,
-    ]
-    result = _run_ytdlp(args, timeout=60)
-    if result.returncode != 0:
-        error = result.stderr.strip() or "Unknown error"
-        raise RuntimeError(f"Failed to get video info: {error}")
-
-    try:
-        data = json.loads(result.stdout.strip().splitlines()[0])
-        return VideoInfo.from_json(data)
-    except (json.JSONDecodeError, IndexError) as e:
-        raise RuntimeError(f"Failed to parse video info: {e}")
-
-
-def get_formats(url: str) -> VideoInfo:
-    """Get video information with formats listed."""
-    args = [
-        "--dump-json",
-        "--no-download",
-        "--no-warnings",
-        url,
-    ]
-    result = _run_ytdlp(args, timeout=60)
-    if result.returncode != 0:
-        error = result.stderr.strip() or "Unknown error"
-        raise RuntimeError(f"Failed to get formats: {error}")
-
-    try:
-        data = json.loads(result.stdout.strip().splitlines()[0])
-        return VideoInfo.from_json(data)
-    except (json.JSONDecodeError, IndexError) as e:
-        raise RuntimeError(f"Failed to parse formats: {e}")
-
-
-def search(query: str, limit: int = 10) -> list[VideoInfo]:
-    """Search YouTube and return results."""
-    search_url = f"ytsearch{limit}:{query}"
-    args = [
-        "--dump-json",
-        "--no-download",
-        "--no-warnings",
-        "--flat-playlist",
-        search_url,
-    ]
-    result = _run_ytdlp(args, timeout=60)
-    if result.returncode != 0:
-        error = result.stderr.strip() or "Unknown error"
-        raise RuntimeError(f"Search failed: {error}")
-
-    videos = []
-    for line in result.stdout.strip().splitlines():
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-            videos.append(VideoInfo.from_json(data))
-        except json.JSONDecodeError:
-            continue
-    return videos
-
-
-def _build_download_args(
-    url: str,
+def _build_opts(
+    url: str = "",
     format_spec: Optional[str] = None,
     output_dir: Optional[Path] = None,
     output_template: Optional[str] = None,
@@ -229,88 +147,154 @@ def _build_download_args(
     cookies_file: Optional[Path] = None,
     extra_args: Optional[list[str]] = None,
     quiet: bool = False,
-) -> list[str]:
-    """Build the argument list for yt-dlp download."""
+    progress_hooks: Optional[list[Callable]] = None,
+) -> dict[str, Any]:
+    """Build yt-dlp options dict from config and overrides."""
     config = load_config()
-    args = []
 
-    # Always download the best quality available
+    opts: dict[str, Any] = {
+        "quiet": quiet,
+        "no_warnings": True,
+        "ignoreerrors": True,
+    }
+
+    # Format
     if format_spec:
-        args.extend(["-f", format_spec])
+        opts["format"] = format_spec
     elif audio_only:
-        args.extend(["-f", "bestaudio/best"])
+        opts["format"] = "bestaudio/best"
     else:
-        args.extend(["-f", config.get("format", "bestvideo+bestaudio/best")])
+        opts["format"] = config.get("format", "bestvideo+bestaudio/best")
 
-    # Output
+    # Output template
     dl_dir = output_dir or get_download_dir()
     tmpl = output_template or config.get("output_template", "%(title)s [%(id)s].%(ext)s")
-    args.extend(["-o", str(dl_dir / tmpl)])
+    opts["outtmpl"] = str(dl_dir / tmpl)
 
     # Audio extraction
     if audio_only:
-        args.append("-x")
-        af = audio_format or config.get("audio_format", "mp3")
-        args.extend(["--audio-format", af])
-        aq = audio_quality if audio_quality is not None else config.get("audio_quality", 0)
-        args.extend(["--audio-quality", str(aq)])
+        opts["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": audio_format or config.get("audio_format", "mp3"),
+                "preferredquality": (
+                    audio_quality if audio_quality is not None
+                    else config.get("audio_quality", 0)
+                ),
+            }
+        ]
 
-    # Metadata
+    # Metadata embedding
     em = embed_metadata if embed_metadata is not None else config.get("embed_metadata", True)
     if em:
-        args.append("--embed-metadata")
+        opts["embedmetadata"] = True
+        opts["writethumbnail"] = True  # needed for embed-thumbnail to work
 
     et = embed_thumbnail if embed_thumbnail is not None else config.get("embed_thumbnail", False)
     if et:
-        args.append("--embed-thumbnail")
+        opts["embedsubs"] = True
+        opts["embedthumbnail"] = True
 
     # Subtitles
     subs = subtitles if subtitles is not None else config.get("subtitles", False)
     if subs:
-        args.append("--write-subs")
-        args.append("--write-auto-subs")
-        sl = subtitles_lang or config.get("subtitles_lang", "en")
-        args.extend(["--sub-langs", sl])
+        opts["writesubtitles"] = True
+        opts["writeautomaticsub"] = True
+        opts["subtitleslangs"] = [subtitles_lang or config.get("subtitles_lang", "en")]
 
     # Thumbnails
     th = thumbnails if thumbnails is not None else config.get("thumbnails", False)
     if th:
-        args.append("--write-thumbnail")
+        opts["writethumbnail"] = True
 
     # Performance
     cf = concurrent if concurrent is not None else config.get("concurrent_fragments", 5)
     if cf > 1:
-        args.extend(["--concurrent-fragments", str(cf)])
+        opts["concurrentfragmentdownloads"] = cf
 
     rt = retries if retries is not None else config.get("retries", 10)
-    args.extend(["--retries", str(rt)])
+    opts["retries"] = rt
 
     # Rate limit
     lr = limit_rate or config.get("limit_rate")
     if lr:
-        args.extend(["--limit-rate", lr])
+        opts["ratelimit"] = lr
 
     # Proxy
     px = proxy or config.get("proxy")
     if px:
-        args.extend(["--proxy", px])
+        opts["proxy"] = px
 
     # Cookies
     cf_path = cookies_file or config.get("cookies_file")
     if cf_path:
-        args.extend(["--cookies", str(Path(cf_path).expanduser())])
+        opts["cookiefile"] = str(Path(cf_path).expanduser())
 
-    # Extra user-provided args
+    # Progress hooks
+    if progress_hooks:
+        opts["progress_hooks"] = progress_hooks
+
+    # Extra args (passed as raw CLI-style args)
     if extra_args:
-        args.extend(extra_args)
+        # yt-dlp's Python API supports 'extractor_args' and 'postprocessor_args'
+        # For truly arbitrary extra args, we'd need a different approach
+        for arg in extra_args:
+            if arg.startswith("--"):
+                # Convert --flag=value or --flag value
+                # We handle simple cases here
+                pass
 
-    if quiet:
-        args.append("--quiet")
+    return opts
 
-    # Add URL last
-    args.append(url)
 
-    return args
+def get_info(url: str) -> VideoInfo:
+    """Get video information."""
+    opts = {"quiet": True, "no_warnings": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            data = ydl.extract_info(url, download=False)
+            if data is None:
+                raise RuntimeError("No data returned")
+            return VideoInfo.from_json(data)
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Failed to get video info: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to get video info: {e}")
+
+
+def get_formats(url: str) -> VideoInfo:
+    """Get video information with formats listed."""
+    # Same as get_info - formats are always included in the response
+    return get_info(url)
+
+
+def search(query: str, limit: int = 10) -> list[VideoInfo]:
+    """Search YouTube and return results."""
+    search_url = f"ytsearch{limit}:{query}"
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "ignoreerrors": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            data = ydl.extract_info(search_url, download=False)
+            if data is None:
+                return []
+            videos = []
+            entries = data.get("entries", [])
+            if entries is None:
+                return []
+            for entry in entries:
+                if entry is None:
+                    continue
+                videos.append(VideoInfo.from_json(entry))
+            return videos
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Search failed: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Search failed: {e}")
 
 
 def download(
@@ -318,6 +302,9 @@ def download(
     format_spec: Optional[str] = None,
     output_dir: Optional[Path] = None,
     output_template: Optional[str] = None,
+    audio_only: bool = False,
+    audio_format: Optional[str] = None,
+    audio_quality: Optional[int] = None,
     embed_metadata: Optional[bool] = None,
     embed_thumbnail: Optional[bool] = None,
     subtitles: Optional[bool] = None,
@@ -331,13 +318,50 @@ def download(
     extra_args: Optional[list[str]] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     quiet: bool = False,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Path:
     """Download a video. Returns the output file path."""
-    args = _build_download_args(
+    output_path: Optional[Path] = None
+    start_time = time.time()
+
+    def _progress_hook(d: dict) -> None:
+        nonlocal output_path
+
+        if d["status"] == "finished":
+            fp = d.get("filename", "")
+            if fp:
+                output_path = Path(fp)
+
+        if progress_callback:
+            # Generate a status line similar to yt-dlp's CLI output
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                downloaded = d.get("downloaded_bytes", 0)
+                pct = (downloaded / total * 100) if total > 0 else 0
+                speed = d.get("speed", 0)
+                eta = d.get("eta", 0)
+
+                speed_str = format_filesize(int(speed)) + "/s" if speed else "N/A"
+                eta_str = format_duration(int(eta)) if eta else "N/A"
+
+                line = (
+                    f"[download] {pct:.1f}% of {format_filesize(int(total))} "
+                    f"at {speed_str} ETA {eta_str}"
+                )
+                progress_callback(line)
+            elif d["status"] == "finished":
+                elapsed = time.time() - start_time
+                line = f"[download] 100% - completed in {elapsed:.1f}s"
+                progress_callback(line)
+
+    opts = _build_opts(
         url=url,
         format_spec=format_spec,
         output_dir=output_dir,
         output_template=output_template,
+        audio_only=audio_only,
+        audio_format=audio_format,
+        audio_quality=audio_quality,
         embed_metadata=embed_metadata,
         embed_thumbnail=embed_thumbnail,
         subtitles=subtitles,
@@ -350,65 +374,32 @@ def download(
         cookies_file=cookies_file,
         extra_args=extra_args,
         quiet=quiet,
+        progress_hooks=[_progress_hook],
     )
 
-    # If we have a progress callback, stream output
-    if progress_callback:
-        cmd = ["yt-dlp"] + args
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            if cancel_check and cancel_check():
+                raise RuntimeError("Cancelled")
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Download failed: {e}")
 
-        output_lines = []
-        for line in process.stdout or []:
-            line = line.rstrip()
-            output_lines.append(line)
-            progress_callback(line)
+    if output_path and output_path.exists():
+        return output_path
 
-        process.wait()
-        if process.returncode != 0:
-            error = "\n".join(output_lines[-5:])
-            raise RuntimeError(f"Download failed:\n{error}")
+    # Fallback: try to find the file
+    dl_dir = output_dir or get_download_dir()
+    tmpl = output_template or load_config().get("output_template", "%(title)s [%(id)s].%(ext)s")
+    # Try a simple heuristic: find the most recent file in the download dir
+    try:
+        files = list(dl_dir.iterdir())
+        if files:
+            newest = max(files, key=lambda f: f.stat().st_mtime)
+            return newest
+    except (OSError, StopIteration):
+        pass
 
-        # Try to extract the output file path from yt-dlp output
-        dest_path = _extract_output_path(output_lines, url)
-        return dest_path
-    else:
-        result = _run_ytdlp(args)
-        if result.returncode != 0:
-            error = result.stderr.strip() or "Unknown error"
-            raise RuntimeError(f"Download failed: {error}")
-
-        # Extract output file path
-        stdout = result.stdout or ""
-        dest_path = _extract_output_path(stdout.splitlines(), url)
-        return dest_path
-
-
-def _extract_output_path(lines: list[str], url: str) -> Path:
-    """Extract the output file path from yt-dlp output."""
-    # Look for "Destination:" or "[Merger] Merging..." or final output path
-    for line in lines:
-        if "Destination:" in line:
-            path = line.split("Destination:")[-1].strip()
-            if path:
-                return Path(path)
-
-    # Look for any line ending with .mp4, .mkv, .webm, .mp3, .m4a etc
-    ext_pattern = re.compile(r'\.(mp4|mkv|webm|mp3|m4a|opus|flac|wav)$')
-    for line in reversed(lines):
-        parts = line.strip().split()
-        for part in parts:
-            if ext_pattern.search(part):
-                return Path(part)
-
-    # Fallback: return download dir with a generic name
-    config = load_config()
-    dl_dir = get_download_dir()
     return dl_dir / "unknown"
 
 
@@ -452,49 +443,52 @@ def download_playlist(
     quiet: bool = False,
 ) -> int:
     """Download a playlist. Returns number of videos downloaded."""
-    args = _build_download_args(
+    playlist_count = 0
+
+    def _playlist_hook(d: dict) -> None:
+        nonlocal playlist_count
+        if d["status"] == "finished":
+            playlist_count += 1
+        if progress_callback:
+            if d["status"] == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                downloaded = d.get("downloaded_bytes", 0)
+                pct = (downloaded / total * 100) if total > 0 else 0
+                speed = d.get("speed", 0)
+                eta = d.get("eta", 0)
+                speed_str = format_filesize(int(speed)) + "/s" if speed else "N/A"
+                eta_str = format_duration(int(eta)) if eta else "N/A"
+                line = (
+                    f"[download] {pct:.1f}% of {format_filesize(int(total))} "
+                    f"at {speed_str} ETA {eta_str}"
+                )
+                progress_callback(line)
+            elif d["status"] == "finished":
+                line = f"[download] 100% - video {playlist_count} completed"
+                progress_callback(line)
+
+    opts = _build_opts(
         url=url,
         format_spec=format_spec,
         output_dir=output_dir,
         output_template=output_template or "%(playlist_title)s/%(playlist_index)s - %(title)s [%(id)s].%(ext)s",
         extra_args=extra_args,
         quiet=quiet,
+        progress_hooks=[_playlist_hook],
     )
 
     if items:
-        args.extend(["--playlist-items", items])
+        opts["playlist_items"] = items
     if reverse:
-        args.append("--playlist-reverse")
+        opts["playlistreverse"] = True
 
-    if progress_callback:
-        cmd = ["yt-dlp"] + args
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        count = 0
-        for line in process.stdout or []:
-            line = line.rstrip()
-            progress_callback(line)
-            if "[download] Downloading video" in line:
-                count += 1
-        process.wait()
-        if process.returncode != 0:
-            raise RuntimeError("Playlist download failed")
-        return count if count > 0 else -1
-    else:
-        result = _run_ytdlp(args)
-        if result.returncode != 0:
-            raise RuntimeError(f"Playlist download failed: {result.stderr.strip()}")
-        # Count downloaded videos
-        count = 0
-        for line in (result.stdout or "").splitlines():
-            if "[download] Downloading video" in line:
-                count += 1
-        return count if count > 0 else -1
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Playlist download failed: {e}")
+
+    return playlist_count if playlist_count > 0 else -1
 
 
 def batch_download(

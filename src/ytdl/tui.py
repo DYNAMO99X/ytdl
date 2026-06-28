@@ -1,21 +1,17 @@
 """Textual-based TUI for ytdl."""
 
-import asyncio
-import json
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rich.text import Text
 from textual import work
+from textual.css.query import NoMatches
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
-from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -156,7 +152,6 @@ class DownloadScreen(Screen):
         self.video_title = title
         self.audio_only = audio_only
         self.dl_task = DownloadTask(id=url, title=title or url, url=url, is_audio=audio_only)
-        self._process: Optional[subprocess.Popen] = None
         self._cancelled = False
 
     def compose(self) -> ComposeResult:
@@ -190,43 +185,15 @@ class DownloadScreen(Screen):
     def _run_download(self):
         """Run the download in a background thread."""
         config = load_config()
-        dl_dir = get_download_dir()
-        output_tmpl = config.get("output_template", "%(title)s [%(id)s].%(ext)s")
-
-        args = ["yt-dlp", "-f", "bestaudio/best" if self.audio_only else "bestvideo+bestaudio/best"]
-
-        if self.audio_only:
-            args.extend(["-x", "--audio-format", config.get("audio_format", "mp3")])
-
-        if config.get("embed_metadata", True):
-            args.append("--embed-metadata")
-
-        args.extend(["-o", str(dl_dir / output_tmpl)])
-        args.append(self.url)
 
         self.post_message(self.ProgressMsg("download", 0, "", "Starting..."))
 
         try:
-            self._process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
             last_percent = -1
-            output_lines = []
 
-            for line in self._process.stdout or []:
-                if self._cancelled:
-                    self._process.kill()
-                    break
-
-                line = line.rstrip()
-                output_lines.append(line)
-
-                # Parse progress
+            def _progress(line: str) -> None:
+                nonlocal last_percent
+                # Parse progress from generated line
                 progress = parse_progress_line(line)
                 if progress:
                     pct = progress["percent"]
@@ -235,27 +202,29 @@ class DownloadScreen(Screen):
                         speed = progress.get("speed", "")
                         eta = progress.get("eta", "")
                         self.post_message(self.ProgressMsg("download", pct, speed, eta))
-
                 # Parse destination
                 dest = parse_destination_line(line)
                 if dest:
                     self.dl_task.filepath = Path(dest)
-
                 self.post_message(self.LogMsg(line))
 
-            self._process.wait()
+            dest = download(
+                url=self.url,
+                audio_only=self.audio_only,
+                progress_callback=_progress,
+                cancel_check=lambda: self._cancelled,
+                quiet=True,
+            )
 
             if self._cancelled:
                 self.post_message(self.ProgressMsg("cancelled", 0, "", "Cancelled"))
-            elif self._process.returncode == 0:
-                self.post_message(self.ProgressMsg("completed", 100, "", "Complete!"))
             else:
-                error = "\n".join(output_lines[-3:])
-                self.post_message(self.ProgressMsg("failed", 0, "", f"Failed: {error}"))
-                self.post_message(self.LogMsg(f"[red]Error: {error}[/red]"))
+                self.dl_task.filepath = dest
+                self.post_message(self.ProgressMsg("completed", 100, "", "Complete!"))
 
         except Exception as e:
             self.post_message(self.ProgressMsg("failed", 0, "", f"Error: {str(e)}"))
+            self.post_message(self.LogMsg(f"[red]Error: {str(e)}[/red]"))
 
     class ProgressMsg(Message):
         def __init__(self, status: str, percent: float, speed: str, eta: str):
@@ -335,11 +304,7 @@ class ConfigScreen(Screen):
         yield Header()
         yield Container(
             Static("[bold]Configuration[/bold]", classes="section-title"),
-            TabbedContent(
-                TabPane("General", id="config-general"),
-                TabPane("Formats", id="config-formats"),
-                TabPane("Advanced", id="config-advanced"),
-            ),
+            TabbedContent(id="config-tabs"),
             Horizontal(
                 Button("Save", variant="primary", id="save-config"),
                 Button("Reset", variant="error", id="reset-config"),
@@ -355,35 +320,31 @@ class ConfigScreen(Screen):
 
     def _load_config_into_tabs(self):
         config = load_config()
-        general_tab = self.query_one("#config-general", TabPane)
-        formats_tab = self.query_one("#config-formats", TabPane)
-        advanced_tab = self.query_one("#config-advanced", TabPane)
 
-        general_widgets = []
+        # Build tab content
+        general_rows = []
         for key in ["download_dir", "output_template", "subtitles", "subtitles_lang", "thumbnails", "embed_metadata", "embed_thumbnail"]:
             val = config.get(key)
-            general_widgets.append(self._make_config_row(key, val))
+            general_rows.append(self._make_config_row(key, val))
 
-        formats_widgets = []
+        formats_rows = []
         for key in ["format", "audio_format", "audio_quality"]:
             val = config.get(key)
-            formats_widgets.append(self._make_config_row(key, val))
+            formats_rows.append(self._make_config_row(key, val))
 
-        advanced_widgets = []
+        advanced_rows = []
         for key in ["concurrent_fragments", "retries", "limit_rate", "proxy", "cookies_file"]:
             val = config.get(key)
-            advanced_widgets.append(self._make_config_row(key, val))
+            advanced_rows.append(self._make_config_row(key, val))
 
-        # Clear and populate
-        general_tab.remove_children()
-        formats_tab.remove_children()
-        advanced_tab.remove_children()
-        for w in general_widgets:
-            general_tab.mount(w)
-        for w in formats_widgets:
-            formats_tab.mount(w)
-        for w in advanced_widgets:
-            advanced_tab.mount(w)
+        # Clear existing tabs and mount new ones
+        tabs = self.query_one("#config-tabs", TabbedContent)
+        tabs.remove_children()
+        tabs.mount(
+            TabPane("General", id="config-general", *general_rows),
+            TabPane("Formats", id="config-formats", *formats_rows),
+            TabPane("Advanced", id="config-advanced", *advanced_rows),
+        )
 
     def _make_config_row(self, key: str, value) -> Container:
         val_str = str(value) if value is not None else ""
@@ -407,20 +368,30 @@ class ConfigScreen(Screen):
     def _save_config(self):
         """Read all input fields and save config."""
         config = load_config()
-        for key in list(config.keys()):
-            widget = self.query_one(f"#cfg-{key}", Input)
-            if widget:
-                val = widget.value
-                if val.lower() in ("true", "false"):
-                    config[key] = val.lower() == "true"
-                elif val.isdigit():
-                    config[key] = int(val)
-                elif val == "" or val == "None":
-                    config[key] = None
-                else:
-                    config[key] = val
+        # Only iterate keys that have corresponding Input widgets
+        config_keys = [
+            "download_dir", "output_template",
+            "subtitles", "subtitles_lang", "thumbnails",
+            "embed_metadata", "embed_thumbnail",
+            "format", "audio_format", "audio_quality",
+            "concurrent_fragments", "retries",
+            "limit_rate", "proxy", "cookies_file",
+        ]
+        for key in config_keys:
+            try:
+                widget = self.query_one(f"#cfg-{key}", Input)
+            except NoMatches:
+                continue
+            val = widget.value
+            if val.lower() in ("true", "false"):
+                config[key] = val.lower() == "true"
+            elif val.isdigit():
+                config[key] = int(val)
+            elif val == "" or val == "None":
+                config[key] = None
+            else:
+                config[key] = val
 
-        # Handle shortcuts separately
         save_config(config)
         self.notify("Configuration saved!", severity="information")
 
@@ -496,12 +467,15 @@ class MainScreen(Screen):
                     classes="button-row",
                 )
             with TabPane("Config", id="tab-config"):
-                yield Static("[bold]Quick Config[/bold]", classes="section-title")
-                yield Static("Edit config file or use 'ytdl config' in CLI for full control")
-                yield Horizontal(
-                    Button("Edit Config File", variant="primary", id="edit-config-btn"),
-                    Button("Open Config Folder", variant="default", id="open-config-btn"),
+                yield Static("[bold]Configuration[/bold]", classes="section-title")
+                yield Vertical(
+                    Static(id="cfg-dl-dir"),
+                    Static(id="cfg-output-tmpl"),
+                    Static(id="cfg-format"),
+                    Static(id="cfg-audio"),
+                    id="config-summary",
                 )
+                yield Button("Open Config Editor", variant="primary", id="open-config-editor")
             with TabPane("About", id="tab-about"):
                 yield Static("[bold yellow]ytdl[/bold yellow]", id="about-title")
                 yield Static(f"Version {__version__}")
@@ -523,6 +497,28 @@ class MainScreen(Screen):
         table.add_columns("#", "Title", "Duration", "Channel", "Views")
         table.cursor_type = "row"
         table.zebra_stripes = True
+        self._refresh_config_summary()
+
+    def _refresh_config_summary(self):
+        """Update the config tab summary with current values."""
+        config = load_config()
+        try:
+            self.query_one("#cfg-dl-dir", Static).update(
+                f"[bold]Download dir:[/bold] {config['download_dir']}"
+            )
+            self.query_one("#cfg-output-tmpl", Static).update(
+                f"[bold]Output template:[/bold] {config['output_template']}"
+            )
+            self.query_one("#cfg-format", Static).update(
+                f"[bold]Default format:[/bold] {config.get('format', 'bestvideo+bestaudio/best')}"
+            )
+            audio_fmt = config.get("audio_format", "mp3")
+            audio_q = config.get("audio_quality", 0)
+            self.query_one("#cfg-audio", Static).update(
+                f"[bold]Audio:[/bold] {audio_fmt} (quality {audio_q})"
+            )
+        except NoMatches:
+            pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-input":
@@ -543,15 +539,8 @@ class MainScreen(Screen):
         elif btn_id == "clear-completed":
             self.completed_downloads.clear()
             self._refresh_downloads_list()
-        elif btn_id == "edit-config-btn":
-            config_path = get_config_path()
-            if not config_path.exists():
-                save_config(load_config())
-            editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "nano"))
-            subprocess.Popen([editor, str(config_path)])
-        elif btn_id == "open-config-btn":
-            config_dir = get_config_path().parent
-            subprocess.Popen(["xdg-open", str(config_dir)])
+        elif btn_id == "open-config-editor":
+            self.app.push_screen(ConfigScreen())
 
     def _do_search(self):
         input_w = self.query_one("#search-input", Input)
@@ -760,6 +749,32 @@ class YtdlApp(App):
 
     TabPane {
         padding: 1 2;
+    }
+
+    #config-container {
+        padding: 1 2;
+        max-width: 80;
+    }
+
+    .config-row {
+        height: 3;
+        layout: horizontal;
+    }
+
+    .config-key {
+        width: 24;
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    .config-input {
+        width: 1fr;
+    }
+
+    #config-summary {
+        margin: 1 0;
+        padding: 1;
+        border: solid $primary;
     }
     """
 
