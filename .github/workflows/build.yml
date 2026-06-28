@@ -1,0 +1,50 @@
+name: Build binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller .
+      - run: pyinstaller --onefile --name ytdl-linux src/ytdl/cli.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytdl-linux
+          path: dist/ytdl-linux
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller .
+      - run: pyinstaller --onefile --name ytdl.exe src/ytdl/cli.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytdl-windows
+          path: dist/ytdl.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller .
+      - run: pyinstaller --onefile --name ytdl-macos src/ytdl/cli.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytdl-macos
+          path: dist/ytdl-macos

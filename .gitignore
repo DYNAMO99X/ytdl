@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Release binaries (built via CI)
+releases/

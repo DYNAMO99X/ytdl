@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytdl"
+version = "1.0.0"
+description = "A beautiful YouTube downloader wrapper for yt-dlp"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "textual>=8.0",
+    "yt-dlp>=2024.0",
+]
+
+[project.scripts]
+ytdl = "ytdl.cli:cli"
+
+[tool.setuptools]
+packages = ["ytdl"]
+package-dir = {"" = "src"}
