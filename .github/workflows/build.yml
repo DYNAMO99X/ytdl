@@ -1,4 +1,4 @@
-name: Build binaries
+name: Build and Release
 
 on:
   push:
@@ -6,45 +6,59 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-linux:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: ytdl-linux
+            ext: ''
+          - os: windows-latest
+            name: ytdl.exe
+            ext: .exe
+          - os: macos-latest
+            name: ytdl-macos
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyinstaller .
+      - run: pyinstaller --onefile --name ${{ matrix.name }} src/ytdl/cli.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+
+  release:
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/download-artifact@v4
         with:
-          python-version: '3.12'
-      - run: pip install pyinstaller .
-      - run: pyinstaller --onefile --name ytdl-linux src/ytdl/cli.py
-      - uses: actions/upload-artifact@v4
+          pattern: ytdl-*
+          merge-multiple: true
+          path: artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ytdl-linux
-          path: dist/ytdl-linux
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## ytdl ${{ github.ref_name }}
 
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install pyinstaller .
-      - run: pyinstaller --onefile --name ytdl.exe src/ytdl/cli.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ytdl-windows
-          path: dist/ytdl.exe
+            Standalone binaries for all platforms.
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install pyinstaller .
-      - run: pyinstaller --onefile --name ytdl-macos src/ytdl/cli.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ytdl-macos
-          path: dist/ytdl-macos
+            ### Usage
+            ```bash
+            ./ytdl-linux --help
+            ```
+
+            See the [README](https://github.com/${{ github.repository }}) for full documentation.
+          files: artifacts/*
+          generate_release_notes: true
